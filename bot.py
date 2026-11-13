@@ -31,9 +31,6 @@ TARGET_EMOJI = os.getenv("TARGET_EMOJI", "➕").strip()
 _channels = os.getenv("ALLOWED_CHANNEL_IDS", "").strip()
 ALLOWED_CHANNEL_IDS = {int(c) for c in _channels.split(",") if c.strip().isdigit()}
 
-# 同一位成員對同一則訊息只複誦一次（取消再按不會重複發送）
-ONCE_PER_USER = os.getenv("ONCE_PER_USER", "true").strip().lower() in ("1", "true", "yes")
-
 WEBHOOK_NAME = "ReactionEcho"
 
 # Webhook 頭像尺寸：16 / 32 / 64 / 128 / 256 / 512 / 1024 / 2048 / 4096
@@ -60,9 +57,6 @@ _commands_synced = False
 # 頻道 ID -> Webhook 快取，避免每次都去查詢 / 建立
 _webhook_cache: dict[int, discord.Webhook] = {}
 _webhook_locks: dict[int, asyncio.Lock] = {}
-
-# 已複誦過的 (訊息 ID, 使用者 ID)
-_echoed: set[tuple[int, int]] = set()
 
 
 def emoji_matches(emoji: discord.PartialEmoji) -> bool:
@@ -182,16 +176,12 @@ async def cmd_delete_webhooks(interaction: discord.Interaction, 範圍: app_comm
         except discord.HTTPException:
             failed += 1
 
-    echoed_count = len(_echoed)
-    _echoed.clear()
-
     where = "整個伺服器" if 範圍.value == "guild" else "本頻道"
     msg = f"已刪除{where}中本 Bot 建立的 Webhook：{deleted} 個。"
     if failed:
         msg += f"\n有 {failed} 個刪除失敗（可能是權限不足）。"
     if not mine:
         msg = f"{where}中沒有本 Bot 建立的 Webhook。"
-    msg += f"\n已一併清除 {echoed_count} 筆複誦紀錄。"
     msg += "\n之後有人按反應時，Bot 會自動重新建立 Webhook 並正常運作。"
     log.info("%s 使用 /刪除webhook（%s）：刪除 %d、失敗 %d", interaction.user, where, deleted, failed)
     await interaction.followup.send(msg, ephemeral=True)
@@ -203,13 +193,10 @@ async def cmd_delete_webhooks(interaction: discord.Interaction, 範圍: app_comm
 @app_commands.checks.has_permissions(administrator=True)
 async def cmd_clear_cache(interaction: discord.Interaction):
     count = len(_webhook_cache)
-    echoed_count = len(_echoed)
     _webhook_cache.clear()
-    _echoed.clear()
-    log.info("%s 使用 /清除webhook快取：清除 Webhook 快取 %d 筆、複誦紀錄 %d 筆",
-             interaction.user, count, echoed_count)
+    log.info("%s 使用 /清除webhook快取：清除 %d 筆", interaction.user, count)
     await interaction.response.send_message(
-        f"已清除 {count} 筆 Webhook 快取、{echoed_count} 筆複誦紀錄。\n"
+        f"已清除 {count} 筆 Webhook 快取。\n"
         "下次發送時 Bot 會重新向 Discord 查詢或建立 Webhook。",
         ephemeral=True,
     )
@@ -259,11 +246,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if not emoji_matches(payload.emoji):
         return
 
-    key = (payload.message_id, member.id)
-    if ONCE_PER_USER and key in _echoed:
-        log.info("略過：%s 已對訊息 %s 複誦過（ONCE_PER_USER=true）", member.display_name, payload.message_id)
-        return
-
     channel = client.get_channel(payload.channel_id)
     if channel is None:
         try:
@@ -303,9 +285,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         return
     content = content[:2000]
 
-    if ONCE_PER_USER:
-        _echoed.add(key)
-
     avatar_url = member.display_avatar.with_size(AVATAR_SIZE).url
     log.info("頭像網址（%s）：%s", member.display_name, avatar_url)
 
@@ -334,13 +313,10 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
                 if attempt == 0:
                     log.warning("#%s 的 Webhook 已失效，正在重新建立並補發…", base_channel.name)
                 else:
-                    _echoed.discard(key)
                     log.error("#%s 重建 Webhook 後仍發送失敗", base_channel.name)
     except discord.Forbidden:
-        _echoed.discard(key)
         log.error("權限不足：請給 Bot『管理 Webhook』與『讀取訊息歷史』權限（#%s）", base_channel.name)
     except discord.HTTPException as e:
-        _echoed.discard(key)
         log.error("發送失敗：%s", e)
 
 
